@@ -51,14 +51,13 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
-  int _currentIndex = 0;
+  int _currentIndex = 1;
 
   String userName = "Luis Fachini";
   double weightCurrent = 103.0;
   double weightTarget = 84.0;
   double weightStart = 105.0;
   double heightCm = 180.0;
-  double bodyFatPercent = 30.3;
   DateTime targetDate = DateTime(2026, 12, 31);
   DateTime startDate = DateTime(2026, 7, 12);
 
@@ -175,23 +174,16 @@ class _MainScreenState extends State<MainScreen> {
         targetDate: targetDate,
         startDate: startDate,
         heightCm: heightCm,
-        bodyFatPercent: bodyFatPercent,
         weightHistory: weightHistory,
-        onProfileUpdate: (name, cur, tar, height, fat, sDate, tDate) {
+        onProfileUpdate: (name, startWeight, cur, tar, height, sDate, tDate) {
           setState(() {
             userName = name;
+            weightStart = startWeight;
             weightCurrent = cur;
             weightTarget = tar;
             heightCm = height;
-            bodyFatPercent = fat;
             startDate = sDate;
             targetDate = tDate;
-            final now = DateTime.now();
-            weightHistory.insert(0, {
-              'id': DateTime.now().millisecondsSinceEpoch,
-              'date': '${now.day}/${now.month}/${now.year}',
-              'weight': cur
-            });
           });
         },
         onDeleteWeight: (id) {
@@ -562,7 +554,6 @@ class DiaryTab extends StatelessWidget {
   final DateTime targetDate;
   final DateTime startDate;
   final double heightCm;
-  final double bodyFatPercent;
   final List<Map<String, dynamic>> weightHistory;
   final Function(String, double, double, double, double, DateTime, DateTime) onProfileUpdate;
   final Function(int) onDeleteWeight;
@@ -577,7 +568,6 @@ class DiaryTab extends StatelessWidget {
     required this.targetDate,
     required this.startDate,
     required this.heightCm,
-    required this.bodyFatPercent,
     required this.weightHistory,
     required this.onProfileUpdate,
     required this.onDeleteWeight,
@@ -586,10 +576,10 @@ class DiaryTab extends StatelessWidget {
 
   void _showEditProfileDialog(BuildContext context) {
     final nameCtrl = TextEditingController(text: userName);
+    final startCtrl = TextEditingController(text: weightStart.toString());
     final curCtrl = TextEditingController(text: weightCurrent.toString());
     final tarCtrl = TextEditingController(text: weightTarget.toString());
     final heightCtrl = TextEditingController(text: heightCm.toString());
-    final fatCtrl = TextEditingController(text: bodyFatPercent.toString());
 
     showDialog(
       context: context,
@@ -601,10 +591,10 @@ class DiaryTab extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: "Nome")),
+              TextField(controller: startCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Peso Inicial (kg)")),
               TextField(controller: curCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Peso Atual (kg)")),
               TextField(controller: tarCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Meta de Peso (kg)")),
               TextField(controller: heightCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Altura (cm)")),
-              TextField(controller: fatCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "% Gordura Corporal")),
             ],
           ),
         ),
@@ -614,10 +604,10 @@ class DiaryTab extends StatelessWidget {
             onPressed: () {
               onProfileUpdate(
                 nameCtrl.text,
+                double.tryParse(startCtrl.text) ?? weightStart,
                 double.tryParse(curCtrl.text) ?? weightCurrent,
                 double.tryParse(tarCtrl.text) ?? weightTarget,
                 double.tryParse(heightCtrl.text) ?? heightCm,
-                double.tryParse(fatCtrl.text) ?? bodyFatPercent,
                 startDate,
                 targetDate,
               );
@@ -664,12 +654,9 @@ class DiaryTab extends StatelessWidget {
     double remainingWeight = weightCurrent - weightTarget;
     double progressPercent = totalWeightToLose > 0 ? (weightLost / totalWeightToLose).clamp(0.0, 1.0) : 0.0;
 
-    int totalDaysPlanned = targetDate.difference(startDate).inDays;
-    int daysPassed = DateTime.now().difference(startDate).inDays;
-    double plannedPercent = totalDaysPlanned > 0 ? (daysPassed / totalDaysPlanned).clamp(0.0, 1.0) : 0.0;
-
     double heightMeters = heightCm / 100;
     double imc = weightCurrent / (heightMeters * heightMeters);
+    double bodyFatPercent = ((1.20 * imc) + (0.23 * 25) - 5.4).clamp(5.0, 60.0);
 
     String getImcClassification(double val) {
       if (val < 18.5) return "Abaixo do peso";
@@ -700,13 +687,13 @@ class DiaryTab extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
-                Column(children: [const Text("Começar", style: TextStyle(color: Colors.grey)), Text("${weightStart} kg", style: const TextStyle(fontWeight: FontWeight.bold))]),
+                Column(children: [const Text("Começar", style: TextStyle(color: Colors.grey)), Text("${weightStart.toStringAsFixed(1)} kg", style: const TextStyle(fontWeight: FontWeight.bold))]),
                 Container(
                   width: 120, height: 120,
                   decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.tealAccent, width: 4)),
-                  child: Center(child: Text("${weightCurrent} kg", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold))),
+                  child: Center(child: Text("${weightCurrent.toStringAsFixed(1)} kg", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold))),
                 ),
-                Column(children: [const Text("Objetivo", style: TextStyle(color: Colors.grey)), Text("${weightTarget} kg", style: const TextStyle(fontWeight: FontWeight.bold))]),
+                Column(children: [const Text("Objetivo", style: TextStyle(color: Colors.grey)), Text("${weightTarget.toStringAsFixed(1)} kg", style: const TextStyle(fontWeight: FontWeight.bold))]),
               ],
             ),
             const SizedBox(height: 20),
@@ -737,8 +724,8 @@ class DiaryTab extends StatelessWidget {
                     child: Column(
                       children: [
                         const Text("Gordura Corporal", style: TextStyle(color: Colors.grey, fontSize: 12)),
-                        Text("${bodyFatPercent}%", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
-                        const Text("Estimativa Atual", style: TextStyle(fontSize: 10, color: Colors.white70)),
+                        Text("${bodyFatPercent.toStringAsFixed(1)}%", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
+                        const Text("Calculado Automaticamente", style: TextStyle(fontSize: 10, color: Colors.white70)),
                       ],
                     ),
                   ),
