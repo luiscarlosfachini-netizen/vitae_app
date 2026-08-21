@@ -70,15 +70,18 @@ class _MainScreenState extends State<MainScreen> {
 
   bool isRunning = false;
   Timer? runTimer;
+  StreamSubscription<Position>? positionStreamSubscription;
   int runSeconds = 0;
   double runDistanceKm = 0.0;
   double runTargetDistance = 5.0;
   Position? lastPosition;
+  DateTime? runStartTime;
 
   @override
   void initState() {
     super.initState();
     _requestPermissions();
+    _loadRunState();
   }
 
   Future<void> _requestPermissions() async {
@@ -90,9 +93,97 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  Future<void> _loadRunState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final startTimeStr = prefs.getString('run_start_time');
+    final savedDistance = prefs.getDouble('run_distance') ?? 0.0;
+
+    if (startTimeStr != null) {
+      final startTime = DateTime.parse(startTimeStr);
+      final diff = DateTime.now().difference(startTime).inSeconds;
+
+      setState(() {
+        isRunning = true;
+        runStartTime = startTime;
+        runSeconds = diff;
+        runDistanceKm = savedDistance;
+      });
+
+      _startRunTracking();
+    }
+  }
+
+  void _startRunTracking() {
+    runTimer?.cancel();
+    runTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
+      if (runStartTime != null) {
+        setState(() {
+          runSeconds = DateTime.now().difference(runStartTime!).inSeconds;
+        });
+        _showRunNotification();
+      }
+    });
+
+    if (!kIsWeb) {
+      const LocationSettings locationSettings = LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 5,
+      );
+
+      positionStreamSubscription?.cancel();
+      positionStreamSubscription = Geolocator.getPositionStream(locationSettings: locationSettings).listen((Position pos) async {
+        if (pos.accuracy > 15.0) return; // Ignora leituras com baixa precisão
+
+        if (lastPosition != null) {
+          double meters = Geolocator.distanceBetween(
+            lastPosition!.latitude, lastPosition!.longitude,
+            pos.latitude, pos.longitude,
+          );
+
+          if (meters >= 5.0 && meters < 100.0) { // Filtra picos irreais de movimentação
+            setState(() {
+              runDistanceKm += meters / 1000.0;
+            });
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setDouble('run_distance', runDistanceKm);
+          }
+        }
+        lastPosition = pos;
+      });
+    }
+  }
+
+  Future<void> _showRunNotification() async {
+    if (kIsWeb) return;
+    int m = runSeconds ~/ 60;
+    int s = runSeconds % 60;
+
+    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+      'run_channel',
+      'Corrida em Andamento',
+      importance: Importance.low,
+      priority: Priority.low,
+      ongoing: true,
+      autoCancel: false,
+    );
+
+    const NotificationDetails details = NotificationDetails(android: androidDetails);
+    await flutterLocalNotificationsPlugin.show(
+      999,
+      'Vitae - Corrida em Andamento',
+      'Distância: ${runDistanceKm.toStringAsFixed(2)} km | Tempo: ${m}m ${s}s',
+      details,
+    );
+  }
+
   void toggleRun() async {
+    final prefs = await SharedPreferences.getInstance();
+
     if (isRunning) {
       runTimer?.cancel();
+      positionStreamSubscription?.cancel();
+      if (!kIsWeb) await flutterLocalNotificationsPlugin.cancel(999);
+
       double paceMinutes = runDistanceKm > 0 ? (runSeconds / 60) / runDistanceKm : 0.0;
       int pMin = paceMinutes.toInt();
       int pSec = ((paceMinutes - pMin) * 60).toInt();
@@ -111,7 +202,12 @@ class _MainScreenState extends State<MainScreen> {
         isRunning = false;
         runSeconds = 0;
         runDistanceKm = 0.0;
+        lastPosition = null;
+        runStartTime = null;
       });
+
+      await prefs.remove('run_start_time');
+      await prefs.remove('run_distance');
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Corrida salva no histórico!')),
@@ -124,33 +220,19 @@ class _MainScreenState extends State<MainScreen> {
         }
       }
 
+      final now = DateTime.now();
+      await prefs.setString('run_start_time', now.toIso8601String());
+      await prefs.setDouble('run_distance', 0.0);
+
       setState(() {
         isRunning = true;
+        runStartTime = now;
         runSeconds = 0;
         runDistanceKm = 0.0;
+        lastPosition = null;
       });
 
-      runTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
-        setState(() => runSeconds++);
-
-        if (!kIsWeb) {
-          try {
-            Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-            if (lastPosition != null) {
-              double meters = Geolocator.distanceBetween(
-                lastPosition!.latitude, lastPosition!.longitude,
-                pos.latitude, pos.longitude,
-              );
-              if (meters > 2.0) {
-                setState(() {
-                  runDistanceKm += meters / 1000.0;
-                });
-              }
-            }
-            lastPosition = pos;
-          } catch (_) {}
-        }
-      });
+      _startRunTracking();
     }
   }
 
