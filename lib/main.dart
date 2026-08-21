@@ -3,8 +3,19 @@ import 'dart:math';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-void main() {
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  if (!kIsWeb) {
+    const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const InitializationSettings initializationSettings = InitializationSettings(android: initializationSettingsAndroid);
+    await flutterLocalNotificationsPlugin.initialize(initializationSettings);
+  }
   runApp(const VitaeApp());
 }
 
@@ -51,19 +62,9 @@ class _MainScreenState extends State<MainScreen> {
   DateTime targetDate = DateTime(2026, 12, 31);
   DateTime startDate = DateTime(2026, 7, 12);
 
-  List<Map<String, dynamic>> fastingHistory = [
-    {'id': 1, 'date': '20/08/2026', 'duration': '16h 00m', 'target': '16h'},
-    {'id': 2, 'date': '19/08/2026', 'duration': '18h 30m', 'target': '18h'},
-  ];
-
-  List<Map<String, dynamic>> weightHistory = [
-    {'id': 1, 'date': '12/07/2026', 'weight': 105.0},
-    {'id': 2, 'date': '20/08/2026', 'weight': 103.0},
-  ];
-
-  List<Map<String, dynamic>> runHistory = [
-    {'id': 1, 'date': '20/08/2026', 'distance': '5.20 km', 'time': '28m 10s', 'pace': '5:25 /km', 'calories': '320 kcal'},
-  ];
+  List<Map<String, dynamic>> fastingHistory = [];
+  List<Map<String, dynamic>> weightHistory = [];
+  List<Map<String, dynamic>> runHistory = [];
 
   bool isRunning = false;
   Timer? runTimer;
@@ -71,6 +72,21 @@ class _MainScreenState extends State<MainScreen> {
   double runDistanceKm = 0.0;
   double runTargetDistance = 5.0;
   Position? lastPosition;
+
+  @override
+  void initState() {
+    super.initState();
+    _requestPermissions();
+  }
+
+  Future<void> _requestPermissions() async {
+    if (!kIsWeb) {
+      await [
+        Permission.location,
+        Permission.notification,
+      ].request();
+    }
+  }
 
   void toggleRun() async {
     if (isRunning) {
@@ -246,62 +262,119 @@ class _FastingTabState extends State<FastingTab> {
   int _targetHours = 16;
   Timer? _timer;
   int _elapsedSeconds = 0;
+  DateTime? _fastingStartTime;
 
   final List<Map<String, String>> _allPhases = [
-    {
-      'range': '0h - 2h',
-      'title': 'Digestão Ativa',
-      'desc': 'O corpo digere os alimentos. A glicose no sangue e a insulina sobem para estocar energia.'
-    },
-    {
-      'range': '2h - 8h',
-      'title': 'Estabilização de Glicemia',
-      'desc': 'Insulina começa a cair. O corpo passa a usar o glicogênio armazenado no fígado como combustível.'
-    },
-    {
-      'range': '8h - 12h',
-      'title': 'Transição & Queima de Gordura',
-      'desc': 'O glicogênio está se esgotando. O metabolismo desacelera o consumo de açúcar e ativa a queima de gordura.'
-    },
-    {
-      'range': '12h - 18h',
-      'title': 'Cetose & Autofagia Inicial',
-      'desc': 'Gordura vira corpos cetônicos para o cérebro. Inicia a reciclagem de células velhas e danificadas (autofagia).'
-    },
-    {
-      'range': '18h+',
-      'title': 'Autofagia Profunda & HGH',
-      'desc': 'Limpeza celular maximizada, redução de inflamação e elevação do Hormônio do Crescimento (HGH).'
-    },
+    {'range': '0h - 2h', 'title': 'Digestão Ativa', 'desc': 'O corpo digere os alimentos. A glicose e a insulina sobem.'},
+    {'range': '2h - 8h', 'title': 'Estabilização de Glicemia', 'desc': 'Insulina cai. O corpo usa o glicogênio armazenado.'},
+    {'range': '8h - 12h', 'title': 'Transição & Queima de Gordura', 'desc': 'Glicogênio esgotando. Ativação da queima de gordura.'},
+    {'range': '12h - 18h', 'title': 'Cetose & Autofagia Inicial', 'desc': 'Gordura vira cetonas. Início da renovação celular.'},
+    {'range': '18h+', 'title': 'Autofagia Profunda & HGH', 'desc': 'Limpeza celular maximizada e elevação do HGH.'},
   ];
 
-  void _toggleFasting() {
+  @override
+  void initState() {
+    super.initState();
+    _loadFastingState();
+  }
+
+  Future<void> _loadFastingState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final startTimeStr = prefs.getString('fasting_start_time');
+    final target = prefs.getInt('fasting_target') ?? 16;
+
+    if (startTimeStr != null) {
+      final startTime = DateTime.parse(startTimeStr);
+      final diff = DateTime.now().difference(startTime).inSeconds;
+
+      setState(() {
+        _isFasting = true;
+        _fastingStartTime = startTime;
+        _targetHours = target;
+        _elapsedSeconds = diff;
+      });
+
+      _startTimer();
+    }
+  }
+
+  void _startTimer() {
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_fastingStartTime != null) {
+        setState(() {
+          _elapsedSeconds = DateTime.now().difference(_fastingStartTime!).inSeconds;
+        });
+        _showNotification();
+      }
+    });
+  }
+
+  Future<void> _showNotification() async {
+    if (kIsWeb) return;
+    int h = _elapsedSeconds ~/ 3600;
+    int m = (_elapsedSeconds % 3600) ~/ 60;
+
+    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+      'fasting_channel',
+      'Jejum em Andamento',
+      importance: Importance.low,
+      priority: Priority.low,
+      ongoing: true,
+      autoCancel: false,
+    );
+
+    const NotificationDetails details = NotificationDetails(android: androidDetails);
+    await flutterLocalNotificationsPlugin.show(
+      888,
+      'Vitae - Jejum em Andamento',
+      'Tempo decorrido: ${h}h ${m}m (Meta: ${_targetHours}h)',
+      details,
+    );
+  }
+
+  Future<void> _toggleFasting() async {
+    final prefs = await SharedPreferences.getInstance();
+
     if (_isFasting) {
       _timer?.cancel();
+      if (!kIsWeb) await flutterLocalNotificationsPlugin.cancel(888);
+
       int hrs = _elapsedSeconds ~/ 3600;
       int mins = (_elapsedSeconds % 3600) ~/ 60;
       final now = DateTime.now();
+
       widget.onFinishFasting({
         'id': DateTime.now().millisecondsSinceEpoch,
         'date': '${now.day}/${now.month}/${now.year}',
         'duration': '${hrs}h ${mins}m',
         'target': '${_targetHours}h',
       });
+
+      await prefs.remove('fasting_start_time');
+      await prefs.remove('fasting_target');
+
       setState(() {
         _isFasting = false;
         _elapsedSeconds = 0;
+        _fastingStartTime = null;
       });
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Jejum encerrado e registrado!')),
       );
     } else {
+      final now = DateTime.now();
+      await prefs.setString('fasting_start_time', now.toIso8601String());
+      await prefs.setInt('fasting_target', _targetHours);
+
       setState(() {
         _isFasting = true;
+        _fastingStartTime = now;
         _elapsedSeconds = 0;
       });
-      _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-        setState(() => _elapsedSeconds++);
-      });
+
+      _startTimer();
     }
   }
 
@@ -311,52 +384,6 @@ class _FastingTabState extends State<FastingTab> {
     if (hours < 12) return 2;
     if (hours < 18) return 3;
     return 4;
-  }
-
-  void _showHistoryModal() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1A2632),
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setModalState) {
-          return Container(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text("Histórico de Jejuns", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: widget.history.isEmpty
-                      ? const Center(child: Text("Nenhum jejum registrado."))
-                      : ListView.builder(
-                          itemCount: widget.history.length,
-                          itemBuilder: (c, idx) {
-                            final item = widget.history[idx];
-                            return Card(
-                              color: Colors.white10,
-                              child: ListTile(
-                                leading: const Icon(Icons.check_circle, color: Colors.tealAccent),
-                                title: Text("Duração: ${item['duration']}"),
-                                subtitle: Text("Data: ${item['date']} | Meta: ${item['target']}"),
-                                trailing: IconButton(
-                                  icon: const Icon(Icons.delete, color: Colors.redAccent),
-                                  onPressed: () {
-                                    widget.onDeleteFasting(item['id']);
-                                    setModalState(() {});
-                                  },
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                )
-              ],
-            ),
-          );
-        },
-      ),
-    );
   }
 
   @override
@@ -377,9 +404,6 @@ class _FastingTabState extends State<FastingTab> {
       appBar: AppBar(
         title: const Text('Jejum Intermitente'),
         backgroundColor: Colors.transparent,
-        actions: [
-          IconButton(icon: const Icon(Icons.bar_chart, color: Colors.tealAccent), onPressed: _showHistoryModal),
-        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
@@ -431,8 +455,6 @@ class _FastingTabState extends State<FastingTab> {
               ),
             ),
             const SizedBox(height: 25),
-            
-            // Fases do Jejum (Carrossel Horizontal)
             Row(
               children: const [
                 Icon(Icons.bolt, color: Colors.tealAccent),
@@ -529,165 +551,6 @@ class DiaryTab extends StatelessWidget {
     required this.onAddWeight,
   });
 
-  void _openProfileDialog(BuildContext context) {
-    final nameController = TextEditingController(text: userName);
-    final curController = TextEditingController(text: weightCurrent.toString());
-    final tarController = TextEditingController(text: weightTarget.toString());
-    final hController = TextEditingController(text: heightCm.toString());
-    final fatController = TextEditingController(text: bodyFatPercent.toString());
-
-    DateTime selectedStart = startDate;
-    DateTime selectedTarget = targetDate;
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setDialogState) {
-          return AlertDialog(
-            backgroundColor: const Color(0xFF1A2632),
-            title: const Text("Configurações do Perfil"),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(controller: nameController, decoration: const InputDecoration(labelText: "Nome")),
-                  TextField(controller: curController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Peso Atual (kg)")),
-                  TextField(controller: tarController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Peso Meta (kg)")),
-                  TextField(controller: hController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Altura (cm)")),
-                  TextField(controller: fatController, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: "Gordura Corporal (%)")),
-                  const SizedBox(height: 15),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text("Data de Início"),
-                    subtitle: Text("${selectedStart.day}/${selectedStart.month}/${selectedStart.year}"),
-                    trailing: const Icon(Icons.calendar_today, color: Colors.tealAccent),
-                    onTap: () async {
-                      final picked = await showDatePicker(
-                        context: context,
-                        initialDate: selectedStart,
-                        firstDate: DateTime(2020),
-                        lastDate: DateTime(2030),
-                      );
-                      if (picked != null) setDialogState(() => selectedStart = picked);
-                    },
-                  ),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text("Data de Objetivo"),
-                    subtitle: Text("${selectedTarget.day}/${selectedTarget.month}/${selectedTarget.year}"),
-                    trailing: const Icon(Icons.flag, color: Colors.tealAccent),
-                    onTap: () async {
-                      final picked = await showDatePicker(
-                        context: context,
-                        initialDate: selectedTarget,
-                        firstDate: DateTime(2020),
-                        lastDate: DateTime(2030),
-                      );
-                      if (picked != null) setDialogState(() => selectedTarget = picked);
-                    },
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
-              ElevatedButton(
-                onPressed: () {
-                  onProfileUpdate(
-                    nameController.text,
-                    double.tryParse(curController.text) ?? weightCurrent,
-                    double.tryParse(tarController.text) ?? weightTarget,
-                    double.tryParse(hController.text) ?? heightCm,
-                    double.tryParse(fatController.text) ?? bodyFatPercent,
-                    selectedStart,
-                    selectedTarget,
-                  );
-                  Navigator.pop(ctx);
-                },
-                child: const Text("Salvar"),
-              )
-            ],
-          );
-        },
-      ),
-    );
-  }
-
-  void _openAddWeightDialog(BuildContext context) {
-    final controller = TextEditingController(text: weightCurrent.toString());
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1A2632),
-        title: const Text("Digite seu peso"),
-        content: TextField(
-          controller: controller,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: const InputDecoration(labelText: "Novo Peso (kg)"),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
-          ElevatedButton(
-            onPressed: () {
-              double? val = double.tryParse(controller.text);
-              if (val != null) {
-                onAddWeight(val);
-              }
-              Navigator.pop(ctx);
-            },
-            child: const Text("Salvar"),
-          )
-        ],
-      ),
-    );
-  }
-
-  void _showReportDialog(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1A2632),
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setModalState) {
-          return Container(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text("Histórico de Pesagens", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: weightHistory.isEmpty
-                      ? const Center(child: Text("Nenhuma pesagem registrada."))
-                      : ListView.builder(
-                          itemCount: weightHistory.length,
-                          itemBuilder: (c, idx) {
-                            final item = weightHistory[idx];
-                            return Card(
-                              color: Colors.white10,
-                              child: ListTile(
-                                leading: const Icon(Icons.monitor_weight, color: Colors.tealAccent),
-                                title: Text("${item['weight']} kg"),
-                                subtitle: Text("Data: ${item['date']}"),
-                                trailing: IconButton(
-                                  icon: const Icon(Icons.delete, color: Colors.redAccent),
-                                  onPressed: () {
-                                    onDeleteWeight(item['id']);
-                                    setModalState(() {});
-                                  },
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                )
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     double totalWeightToLose = weightStart - weightTarget;
@@ -701,124 +564,34 @@ class DiaryTab extends StatelessWidget {
 
     double heightMeters = heightCm / 100;
     double imc = weightCurrent / (heightMeters * heightMeters);
-    String imcStatus = "Normal";
-    if (imc >= 30) imcStatus = "Obeso Classe I";
-    else if (imc >= 25) imcStatus = "Sobrepeso";
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Diário Vitae'),
-        backgroundColor: Colors.transparent,
-        actions: [
-          IconButton(icon: const Icon(Icons.bar_chart, color: Colors.tealAccent), onPressed: () => _showReportDialog(context)),
-          IconButton(icon: const Icon(Icons.settings, color: Colors.tealAccent), onPressed: () => _openProfileDialog(context)),
-        ],
-      ),
+      appBar: AppBar(title: const Text('Diário Vitae'), backgroundColor: Colors.transparent),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+        padding: const EdgeInsets.all(16.0),
         child: Column(
           children: [
-            Text(userName, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: Colors.white)),
+            Text(userName, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
             const SizedBox(height: 20),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
-                Column(
-                  children: [
-                    const Text("Começar", style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 4),
-                    Text("${weightStart.toStringAsFixed(1)} kg", style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                    Text("IMC: ${(weightStart / (heightMeters * heightMeters)).toStringAsFixed(1)}", style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                    Text("${startDate.day}/${startDate.month}/${startDate.year}", style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                  ],
-                ),
+                Column(children: [const Text("Começar"), Text("${weightStart} kg")]),
                 Container(
-                  width: 140,
-                  height: 140,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.grey.shade700, width: 4),
-                  ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Text("Atual", style: TextStyle(color: Colors.yellow, fontSize: 12)),
-                      Text("${weightCurrent.toStringAsFixed(1)} kg", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-                    ],
-                  ),
+                  width: 120, height: 120,
+                  decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: Colors.tealAccent, width: 3)),
+                  child: Center(child: Text("${weightCurrent} kg", style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
                 ),
-                Column(
-                  children: [
-                    const Text("Objetivo", style: TextStyle(color: Colors.yellow, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 4),
-                    Text("${weightTarget.toStringAsFixed(1)} kg", style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                    Text("IMC: ${(weightTarget / (heightMeters * heightMeters)).toStringAsFixed(1)}", style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                    Text("${targetDate.day}/${targetDate.month}/${targetDate.year}", style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 25),
-            const Divider(color: Colors.white24),
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8.0),
-              child: Row(
-                children: [
-                  const SizedBox(width: 80, child: Text("Progresso", style: TextStyle(color: Colors.grey))),
-                  Expanded(child: LinearProgressIndicator(value: progressPercent, color: Colors.white, backgroundColor: Colors.white12)),
-                  const SizedBox(width: 10),
-                  Text("${(progressPercent * 100).toStringAsFixed(1)}%"),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8.0),
-              child: Row(
-                children: [
-                  const SizedBox(width: 80, child: Text("Planejado", style: TextStyle(color: Colors.grey))),
-                  Expanded(child: LinearProgressIndicator(value: plannedPercent, color: Colors.white, backgroundColor: Colors.white12)),
-                  const SizedBox(width: 10),
-                  Text("${(plannedPercent * 100).toStringAsFixed(1)}%"),
-                ],
-              ),
-            ),
-            const Divider(color: Colors.white24),
-            const SizedBox(height: 10),
-            const Text("Estatísticas atuais", style: TextStyle(color: Colors.yellow, fontSize: 16, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 15),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                _buildStatColumn("Gordura corporal", "${bodyFatPercent.toStringAsFixed(1)} %"),
-                _buildStatColumn("Você perdeu", "${weightLost.toStringAsFixed(1)} kg"),
-                _buildStatColumn("Remanescente", "${remainingWeight.toStringAsFixed(1)} kg"),
+                Column(children: [const Text("Objetivo"), Text("${weightTarget} kg")]),
               ],
             ),
             const SizedBox(height: 20),
-            Text("IMC: ${imc.toStringAsFixed(1)}   $imcStatus", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
-            const SizedBox(height: 30),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.white24,
-                minimumSize: const Size(double.infinity, 50),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-              ),
-              onPressed: () => _openAddWeightDialog(context),
-              child: const Text("Digite seu peso", style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-            ),
+            LinearProgressIndicator(value: progressPercent, color: Colors.tealAccent),
+            const SizedBox(height: 10),
+            Text("Progresso: ${(progressPercent * 100).toStringAsFixed(1)}%"),
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildStatColumn(String label, String val) {
-    return Column(
-      children: [
-        Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12)),
-        const SizedBox(height: 4),
-        Text(val, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-      ],
     );
   }
 }
@@ -845,143 +618,25 @@ class RunTab extends StatelessWidget {
     required this.onDeleteRun,
   });
 
-  void _showSetGoalDialog(BuildContext context) {
-    final controller = TextEditingController(text: targetDistance.toString());
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1A2632),
-        title: const Text("Definir Meta de Corrida"),
-        content: TextField(
-          controller: controller,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(labelText: "Distância (km)"),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
-          ElevatedButton(
-            onPressed: () {
-              onUpdateTarget(double.tryParse(controller.text) ?? targetDistance);
-              Navigator.pop(ctx);
-            },
-            child: const Text("Definir"),
-          )
-        ],
-      ),
-    );
-  }
-
-  void _showHistoryModal(BuildContext context) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1A2632),
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setModalState) {
-          return Container(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text("Histórico de Corridas", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: history.isEmpty
-                      ? const Center(child: Text("Nenhuma corrida realizada."))
-                      : ListView.builder(
-                          itemCount: history.length,
-                          itemBuilder: (c, idx) {
-                            final item = history[idx];
-                            return Card(
-                              color: Colors.white10,
-                              child: ListTile(
-                                leading: const Icon(Icons.directions_run, color: Colors.tealAccent),
-                                title: Text("${item['distance']} - ${item['time']}"),
-                                subtitle: Text("Pace: ${item['pace']} | ${item['calories']} (${item['date']})"),
-                                trailing: IconButton(
-                                  icon: const Icon(Icons.delete, color: Colors.redAccent),
-                                  onPressed: () {
-                                    onDeleteRun(item['id']);
-                                    setModalState(() {});
-                                  },
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                )
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    double paceMinutes = distanceKm > 0 ? (seconds / 60) / distanceKm : 0.0;
-    int pMin = paceMinutes.toInt();
-    int pSec = ((paceMinutes - pMin) * 60).toInt();
-    int calories = (distanceKm * 65).toInt();
-
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Corrida & Caminhada'),
-        backgroundColor: Colors.transparent,
-        actions: [
-          IconButton(icon: const Icon(Icons.bar_chart, color: Colors.tealAccent), onPressed: () => _showHistoryModal(context)),
-        ],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
+      appBar: AppBar(title: const Text('Corrida & GPS'), backgroundColor: Colors.transparent),
+      body: Center(
         child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            ActionChip(
-              avatar: const Icon(Icons.flag, color: Colors.tealAccent),
-              label: Text("Meta: ${targetDistance.toStringAsFixed(1)} km"),
-              onPressed: () => _showSetGoalDialog(context),
-            ),
-            const SizedBox(height: 30),
-            Text(
-              distanceKm.toStringAsFixed(2),
-              style: const TextStyle(fontSize: 64, fontWeight: FontWeight.bold, color: Colors.tealAccent),
-            ),
-            const Text("QUILÔMETROS", style: TextStyle(color: Colors.grey)),
-            const SizedBox(height: 30),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                _buildMetricColumn("Tempo", "${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}"),
-                _buildMetricColumn("Pace Médio", "$pMin:${pSec.toString().padLeft(2, '0')} /km"),
-                _buildMetricColumn("Calorias", "$calories kcal"),
-              ],
-            ),
-            const Spacer(),
+            Text(distanceKm.toStringAsFixed(2), style: const TextStyle(fontSize: 64, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
+            const Text("QUILÔMETROS"),
+            const SizedBox(height: 40),
             ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: isRunning ? Colors.redAccent : Colors.tealAccent,
-                minimumSize: const Size(double.infinity, 50),
-              ),
+              style: ElevatedButton.styleFrom(backgroundColor: isRunning ? Colors.redAccent : Colors.tealAccent),
               onPressed: onToggleRun,
-              child: Text(
-                isRunning ? 'PARAR & SALVAR' : 'INICIAR ATIVIDADE',
-                style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 16),
-              ),
-            ),
-            const SizedBox(height: 20),
+              child: Text(isRunning ? 'PARAR CORRIDA' : 'INICIAR CORRIDA', style: const TextStyle(color: Colors.black)),
+            )
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildMetricColumn(String label, String value) {
-    return Column(
-      children: [
-        Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12)),
-        const SizedBox(height: 4),
-        Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-      ],
     );
   }
 }
