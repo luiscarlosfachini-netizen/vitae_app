@@ -5,12 +5,8 @@
     instance_type: mac_mini_m1
     environment:
       flutter: stable
-      xcode: latest
       java: 17
     scripts:
-      - name: Set up local.properties
-        script: |
-          echo "flutter.sdk=$HOME/programs/flutter" > $CM_BUILD_DIR/android/local.properties
       - name: Get Flutter packages
         script: |
           flutter packages pub get
@@ -24,5 +20,5 @@
         recipients:
           - luiscarlosfachini@netizen.com.br
         notify:
-          on_success: true
-          on_failure: false
+          success: true
+          failure: false
