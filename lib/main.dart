@@ -796,7 +796,7 @@ class DiaryTab extends StatelessWidget {
 
     showDialog(
       context: context,
-      builder: (ctx) => StatefulWidget(
+      builder: (ctx) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           backgroundColor: const Color(0xFF1A2632),
           title: const Text("Editar Perfil & Metas"),
@@ -922,7 +922,7 @@ class DiaryTab extends StatelessWidget {
     }
 
     String getImcClassification(double val) {
-      if (val == 0) return "Não calculado";
+      if (val == 0) return "Não calculated";
       if (val < 18.5) return "Abaixo do peso";
       if (val < 24.9) return "Peso normal";
       if (val < 29.9) return "Sobrepeso";
