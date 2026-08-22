@@ -88,6 +88,7 @@ class _MainScreenState extends State<MainScreen> {
   List<Map<String, dynamic>> measurementsHistory = [];
 
   // Dieta
+  List<Map<String, dynamic>> fixedMeals = [];
   List<Map<String, dynamic>> dietMeals = [];
 
   @override
@@ -332,7 +333,18 @@ class _MainScreenState extends State<MainScreen> {
         },
       ),
       DietTab(
+        fixedMeals: fixedMeals,
         meals: dietMeals,
+        onAddFixedMeal: (meal) {
+          setState(() {
+            fixedMeals.add(meal);
+          });
+        },
+        onDeleteFixedMeal: (id) {
+          setState(() {
+            fixedMeals.removeWhere((m) => m['id'] == id);
+          });
+        },
         onAddMeal: (meal) {
           setState(() {
             dietMeals.add(meal);
@@ -922,7 +934,7 @@ class DiaryTab extends StatelessWidget {
     }
 
     String getImcClassification(double val) {
-      if (val == 0) return "Não calculated";
+      if (val == 0) return "Não calculado";
       if (val < 18.5) return "Abaixo do peso";
       if (val < 24.9) return "Peso normal";
       if (val < 29.9) return "Sobrepeso";
@@ -1413,18 +1425,68 @@ class MeasurementsTab extends StatelessWidget {
 }
 
 class DietTab extends StatelessWidget {
+  final List<Map<String, dynamic>> fixedMeals;
   final List<Map<String, dynamic>> meals;
+  final Function(Map<String, dynamic>) onAddFixedMeal;
+  final Function(int) onDeleteFixedMeal;
   final Function(Map<String, dynamic>) onAddMeal;
   final Function(int) onToggleMealDone;
   final Function(int) onDeleteMeal;
 
   const DietTab({
     super.key,
+    required this.fixedMeals,
     required this.meals,
+    required this.onAddFixedMeal,
+    required this.onDeleteFixedMeal,
     required this.onAddMeal,
     required this.onToggleMealDone,
     required this.onDeleteMeal,
   });
+
+  void _showAddFixedMealDialog(BuildContext context) {
+    final titleCtrl = TextEditingController();
+    final foodCtrl = TextEditingController();
+    final calCtrl = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A2632),
+        title: const Text("Nova Refeição Fixa"),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: titleCtrl, decoration: const InputDecoration(labelText: "Nome (ex: Café da Manhã Fixo)")),
+              TextField(controller: foodCtrl, decoration: const InputDecoration(labelText: "Alimentos")),
+              TextField(
+                controller: calCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: "Calorias Meta (kcal)"),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
+          ElevatedButton(
+            onPressed: () {
+              int calories = int.tryParse(calCtrl.text) ?? 200;
+              onAddFixedMeal({
+                'id': DateTime.now().millisecondsSinceEpoch,
+                'title': titleCtrl.text.isEmpty ? 'Refeição Fina' : titleCtrl.text,
+                'foods': foodCtrl.text,
+                'calories': calories,
+              });
+              Navigator.pop(ctx);
+            },
+            child: const Text("Salvar"),
+          ),
+        ],
+      ),
+    );
+  }
 
   void _showAddMealDialog(BuildContext context) {
     final titleCtrl = TextEditingController();
@@ -1436,19 +1498,19 @@ class DietTab extends StatelessWidget {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1A2632),
-        title: const Text("Nova Refeição"),
+        title: const Text("Nova Refeição do Dia"),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(controller: titleCtrl, decoration: const InputDecoration(labelText: "Nome da Refeição (ex: Café da Manhã)")),
+              TextField(controller: titleCtrl, decoration: const InputDecoration(labelText: "Nome da Refeição")),
               TextField(controller: timeCtrl, decoration: const InputDecoration(labelText: "Horário (ex: 08:30)")),
-              TextField(controller: foodCtrl, decoration: const InputDecoration(labelText: "Alimentos (ex: 2 Ovos, 1 Café sem açúcar)")),
+              TextField(controller: foodCtrl, decoration: const InputDecoration(labelText: "Alimentos Consumidos")),
               TextField(
                 controller: calCtrl,
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
-                  labelText: "Calorias Estimadas (kcal)",
+                  labelText: "Calorias Consumidas (kcal)",
                   hintText: "Deixe vazio para autoestimar (150 kcal)",
                 ),
               ),
@@ -1466,7 +1528,7 @@ class DietTab extends StatelessWidget {
                 'time': timeCtrl.text,
                 'foods': foodCtrl.text,
                 'calories': calories,
-                'done': false,
+                'done': true,
               });
               Navigator.pop(ctx);
             },
@@ -1479,8 +1541,8 @@ class DietTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    int totalCalories = meals.fold(0, (sum, m) => sum + (m['calories'] as int));
-    int consumedCalories = meals.where((m) => m['done'] == true).fold(0, (sum, m) => sum + (m['calories'] as int));
+    int totalPlannedCalories = fixedMeals.fold(0, (sum, m) => sum + (m['calories'] as int));
+    int totalConsumedCalories = meals.where((m) => m['done'] == true).fold(0, (sum, m) => sum + (m['calories'] as int));
 
     return Scaffold(
       appBar: AppBar(
@@ -1490,7 +1552,44 @@ class DietTab extends StatelessWidget {
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text("Refeições Fixas (Metas)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                ElevatedButton.icon(
+                  onPressed: () => _showAddFixedMealDialog(context),
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text("Nova Fixa"),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent, foregroundColor: Colors.black),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            fixedMeals.isEmpty
+                ? const Text("Nenhuma refeição fixa cadastrada.", style: TextStyle(color: Colors.grey))
+                : ListView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: fixedMeals.length,
+                    itemBuilder: (ctx, idx) {
+                      final meal = fixedMeals[idx];
+                      return Card(
+                        color: const Color(0xFF1A2632),
+                        child: ListTile(
+                          title: Text(meal['title']),
+                          subtitle: Text("${meal['foods']}\nMeta: ${meal['calories']} kcal"),
+                          isThreeLine: true,
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.redAccent),
+                            onPressed: () => onDeleteFixedMeal(meal['id']),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+            const SizedBox(height: 25),
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(color: const Color(0xFF1A2632), borderRadius: BorderRadius.circular(12)),
@@ -1499,14 +1598,14 @@ class DietTab extends StatelessWidget {
                 children: [
                   Column(
                     children: [
-                      const Text("Planejado", style: TextStyle(color: Colors.grey, fontSize: 12)),
-                      Text("$totalCalories kcal", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
+                      const Text("Planejado (Fixas)", style: TextStyle(color: Colors.grey, fontSize: 12)),
+                      Text("$totalPlannedCalories kcal", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
                     ],
                   ),
                   Column(
                     children: [
-                      const Text("Consumido", style: TextStyle(color: Colors.grey, fontSize: 12)),
-                      Text("$consumedCalories kcal", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.orangeAccent)),
+                      const Text("Consumido (Dia)", style: TextStyle(color: Colors.grey, fontSize: 12)),
+                      Text("$totalConsumedCalories kcal", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.orangeAccent)),
                     ],
                   ),
                 ],
@@ -1520,14 +1619,14 @@ class DietTab extends StatelessWidget {
                 ElevatedButton.icon(
                   onPressed: () => _showAddMealDialog(context),
                   icon: const Icon(Icons.add, size: 16),
-                  label: const Text("Nova Refeição"),
+                  label: const Text("Adicionar Consumida"),
                   style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent, foregroundColor: Colors.black),
                 ),
               ],
             ),
             const SizedBox(height: 10),
             meals.isEmpty
-                ? const Text("Nenhuma refeição cadastrada.", style: TextStyle(color: Colors.grey))
+                ? const Text("Nenhuma refeição registrada hoje.", style: TextStyle(color: Colors.grey))
                 : ListView.builder(
                     shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
@@ -1546,7 +1645,7 @@ class DietTab extends StatelessWidget {
                             onChanged: (_) => onToggleMealDone(meal['id']),
                           ),
                           title: Text("${meal['time']} - ${meal['title']}", style: TextStyle(decoration: isDone ? TextDecoration.lineThrough : null)),
-                          subtitle: Text("${meal['foods']}\nEstimativa: ${meal['calories']} kcal"),
+                          subtitle: Text("${meal['foods']}\nConsumido: ${meal['calories']} kcal"),
                           isThreeLine: true,
                           trailing: IconButton(
                             icon: const Icon(Icons.delete, color: Colors.redAccent),
