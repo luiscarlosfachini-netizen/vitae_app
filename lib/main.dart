@@ -2,24 +2,20 @@
 import 'dart:math';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
-    FlutterLocalNotificationsPlugin();
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin = FlutterLocalNotificationsPlugin();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
   if (!kIsWeb) {
-    const AndroidInitializationSettings initializationSettingsAndroid =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
-    const InitializationSettings initializationSettings =
-        InitializationSettings(android: initializationSettingsAndroid);
+    const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const InitializationSettings initializationSettings = InitializationSettings(android: initializationSettingsAndroid);
     await flutterLocalNotificationsPlugin.initialize(initializationSettings);
   }
-
   runApp(const VitaeApp());
 }
 
@@ -29,7 +25,7 @@ class VitaeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Vitae - App de Saúde',
+      title: 'Vitae',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
@@ -57,14 +53,14 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   int _currentIndex = 0;
 
-  // Diario
-  String userName = "Seu Nome";
-  double weightCurrent = 80.0;
-  double weightTarget = 70.0;
-  double weightStart = 85.0;
-  double heightCm = 175.0;
-  DateTime? startDate = DateTime.now().subtract(const Duration(days: 10));
-  DateTime? targetDate = DateTime.now().add(const Duration(days: 80));
+  // Diário
+  String userName = "Usuário";
+  double weightCurrent = 0.0;
+  double weightTarget = 0.0;
+  double weightStart = 0.0;
+  double heightCm = 0.0;
+  DateTime? startDate;
+  DateTime? targetDate;
   List<Map<String, dynamic>> weightHistory = [];
 
   // Jejum
@@ -74,9 +70,11 @@ class _MainScreenState extends State<MainScreen> {
   List<Map<String, dynamic>> runHistory = [];
   bool isRunning = false;
   Timer? runTimer;
+  StreamSubscription<Position>? positionStreamSubscription;
   int runSeconds = 0;
   double runDistanceKm = 0.0;
   double runTargetDistance = 5.0;
+  Position? lastPosition;
   DateTime? runStartTime;
 
   // Medidas
@@ -96,7 +94,17 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
+    _requestPermissions();
     _loadRunState();
+  }
+
+  Future<void> _requestPermissions() async {
+    if (!kIsWeb) {
+      await [
+        Permission.location,
+        Permission.notification,
+      ].request();
+    }
   }
 
   Future<void> _loadRunState() async {
@@ -127,12 +135,62 @@ class _MainScreenState extends State<MainScreen> {
       if (runStartTime != null && mounted) {
         setState(() {
           runSeconds = DateTime.now().difference(runStartTime!).inSeconds;
-          if (kIsWeb) {
-            runDistanceKm += 0.002;
-          }
         });
+        _showRunNotification();
       }
     });
+
+    if (!kIsWeb) {
+      const LocationSettings locationSettings = LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 5,
+      );
+
+      positionStreamSubscription?.cancel();
+      positionStreamSubscription = Geolocator.getPositionStream(locationSettings: locationSettings).listen((Position pos) async {
+        if (pos.accuracy > 15.0) return;
+
+        if (lastPosition != null) {
+          double meters = Geolocator.distanceBetween(
+            lastPosition!.latitude, lastPosition!.longitude,
+            pos.latitude, pos.longitude,
+          );
+
+          if (meters >= 5.0 && meters < 100.0) {
+            setState(() {
+              runDistanceKm += meters / 1000.0;
+            });
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setDouble('run_distance', runDistanceKm);
+          }
+        }
+        lastPosition = pos;
+      });
+    }
+  }
+
+  Future<void> _showRunNotification() async {
+    if (kIsWeb) return;
+    int h = runSeconds ~/ 3600;
+    int m = (runSeconds % 3600) ~/ 60;
+    int s = runSeconds % 60;
+
+    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+      'run_channel',
+      'Corrida em Andamento',
+      importance: Importance.low,
+      priority: Priority.low,
+      ongoing: true,
+      autoCancel: false,
+    );
+
+    const NotificationDetails details = NotificationDetails(android: androidDetails);
+    await flutterLocalNotificationsPlugin.show(
+      999,
+      'Vitae - Corrida em Andamento',
+      'Distância: ${runDistanceKm.toStringAsFixed(2)} km | Tempo: ${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}',
+      details,
+    ).catchError((_) {});
   }
 
   void toggleRun() async {
@@ -141,9 +199,14 @@ class _MainScreenState extends State<MainScreen> {
     if (isRunning) {
       runTimer?.cancel();
       runTimer = null;
+      positionStreamSubscription?.cancel();
+      positionStreamSubscription = null;
 
-      double paceMinutes =
-          runDistanceKm > 0 ? (runSeconds / 60) / runDistanceKm : 0.0;
+      if (!kIsWeb) {
+        await flutterLocalNotificationsPlugin.cancel(999).catchError((_) {});
+      }
+
+      double paceMinutes = runDistanceKm > 0 ? (runSeconds / 60) / runDistanceKm : 0.0;
       int pMin = paceMinutes.toInt();
       int pSec = ((paceMinutes - pMin) * 60).toInt();
       int calories = (runDistanceKm * 65).toInt();
@@ -152,17 +215,16 @@ class _MainScreenState extends State<MainScreen> {
       setState(() {
         runHistory.insert(0, {
           'id': DateTime.now().millisecondsSinceEpoch,
-          'date':
-              '${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year}',
+          'date': '${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year}',
           'distance': '${runDistanceKm.toStringAsFixed(2)} km',
-          'time':
-              '${runSeconds ~/ 3600}h ${(runSeconds % 3600) ~/ 60}m ${runSeconds % 60}s',
+          'time': '${runSeconds ~/ 3600}h ${(runSeconds % 3600) ~/ 60}m ${runSeconds % 60}s',
           'pace': '$pMin:${pSec.toString().padLeft(2, '0')} /km',
           'calories': '$calories kcal',
         });
         isRunning = false;
         runSeconds = 0;
         runDistanceKm = 0.0;
+        lastPosition = null;
         runStartTime = null;
       });
 
@@ -175,6 +237,13 @@ class _MainScreenState extends State<MainScreen> {
         );
       }
     } else {
+      if (!kIsWeb) {
+        LocationPermission permission = await Geolocator.checkPermission();
+        if (permission == LocationPermission.denied) {
+          permission = await Geolocator.requestPermission();
+        }
+      }
+
       final now = DateTime.now();
       await prefs.setString('run_start_time', now.toIso8601String());
       await prefs.setDouble('run_distance', 0.0);
@@ -184,6 +253,7 @@ class _MainScreenState extends State<MainScreen> {
         runStartTime = now;
         runSeconds = 0;
         runDistanceKm = 0.0;
+        lastPosition = null;
       });
 
       _startRunTracking();
@@ -199,49 +269,13 @@ class _MainScreenState extends State<MainScreen> {
           setState(() => fastingHistory.insert(0, entry));
         },
         onDeleteFasting: (id) {
-          setState(
-              () => fastingHistory.removeWhere((item) => item['id'] == id));
+          setState(() => fastingHistory.removeWhere((item) => item['id'] == id));
         },
         onAddManualFasting: (entry) {
           setState(() => fastingHistory.insert(0, entry));
         },
       ),
-      DiaryTab(
-        userName: userName,
-        weightCurrent: weightCurrent,
-        weightTarget: weightTarget,
-        weightStart: weightStart,
-        targetDate: targetDate,
-        startDate: startDate,
-        heightCm: heightCm,
-        weightHistory: weightHistory,
-        onProfileUpdate: (name, startWeight, cur, tar, height, sDate, tDate) {
-          setState(() {
-            userName = name;
-            weightStart = startWeight;
-            weightCurrent = cur;
-            weightTarget = tar;
-            heightCm = height;
-            startDate = sDate;
-            targetDate = tDate;
-          });
-        },
-        onDeleteWeight: (id) {
-          setState(() => weightHistory.removeWhere((item) => item['id'] == id));
-        },
-        onAddWeight: (newWeight) {
-          final now = DateTime.now();
-          setState(() {
-            weightCurrent = newWeight;
-            weightHistory.insert(0, {
-              'id': DateTime.now().millisecondsSinceEpoch,
-              'date':
-                  '${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year}',
-              'weight': newWeight
-            });
-          });
-        },
-      ),
+      Container(), // Diário
       RunTab(
         history: runHistory,
         isRunning: isRunning,
@@ -249,61 +283,13 @@ class _MainScreenState extends State<MainScreen> {
         distanceKm: runDistanceKm,
         targetDistance: runTargetDistance,
         onToggleRun: toggleRun,
-        onUpdateTarget: (newTarget) =>
-            setState(() => runTargetDistance = newTarget),
+        onUpdateTarget: (newTarget) => setState(() => runTargetDistance = newTarget),
         onDeleteRun: (id) {
           setState(() => runHistory.removeWhere((item) => item['id'] == id));
         },
       ),
-      MeasurementsTab(
-        enabledMeasurements: enabledMeasurements,
-        history: measurementsHistory,
-        onUpdateConfig: (newConfig) {
-          setState(() {
-            enabledMeasurements = newConfig;
-          });
-        },
-        onAddMeasurement: (entry) {
-          setState(() {
-            measurementsHistory.insert(0, entry);
-          });
-        },
-        onDeleteMeasurement: (id) {
-          setState(() {
-            measurementsHistory.removeWhere((item) => item['id'] == id);
-          });
-        },
-      ),
-      DietTab(
-        fixedMeals: fixedMeals,
-        meals: dietMeals,
-        onAddFixedMeal: (meal) {
-          setState(() {
-            fixedMeals.add(meal);
-          });
-        },
-        onDeleteFixedMeal: (id) {
-          setState(() {
-            fixedMeals.removeWhere((m) => m['id'] == id);
-          });
-        },
-        onAddMeal: (meal) {
-          setState(() {
-            dietMeals.add(meal);
-          });
-        },
-        onToggleMealDone: (id) {
-          setState(() {
-            final meal = dietMeals.firstWhere((m) => m['id'] == id);
-            meal['done'] = !(meal['done'] ?? false);
-          });
-        },
-        onDeleteMeal: (id) {
-          setState(() {
-            dietMeals.removeWhere((m) => m['id'] == id);
-          });
-        },
-      ),
+      Container(), // Medidas
+      Container(), // Dieta
     ];
 
     return Scaffold(
@@ -321,12 +307,9 @@ class _MainScreenState extends State<MainScreen> {
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.timer), label: 'Jejum'),
           BottomNavigationBarItem(icon: Icon(Icons.book), label: 'Diário'),
-          BottomNavigationBarItem(
-              icon: Icon(Icons.directions_run), label: 'Corrida'),
-          BottomNavigationBarItem(
-              icon: Icon(Icons.straighten), label: 'Medidas'),
-          BottomNavigationBarItem(
-              icon: Icon(Icons.restaurant_menu), label: 'Dieta'),
+          BottomNavigationBarItem(icon: Icon(Icons.directions_run), label: 'Corrida'),
+          BottomNavigationBarItem(icon: Icon(Icons.straighten), label: 'Medidas'),
+          BottomNavigationBarItem(icon: Icon(Icons.restaurant_menu), label: 'Dieta'),
         ],
       ),
     );
@@ -359,31 +342,11 @@ class _FastingTabState extends State<FastingTab> {
   DateTime? _fastingStartTime;
 
   final List<Map<String, String>> _allPhases = [
-    {
-      'range': '0h - 2h',
-      'title': 'Digestão Ativa',
-      'desc': 'O corpo digere os alimentos. A glicose e a insulina sobem.'
-    },
-    {
-      'range': '2h - 8h',
-      'title': 'Estabilização de Glicemia',
-      'desc': 'Insulina cai. O corpo usa o glicocênio armazenado.'
-    },
-    {
-      'range': '8h - 12h',
-      'title': 'Transição & Queima de Gordura',
-      'desc': 'Glicocênio esgotando. Ativação da queima de gordura.'
-    },
-    {
-      'range': '12h - 18h',
-      'title': 'Cetose & Autofagia Inicial',
-      'desc': 'Gordura vira cetonas. Início da renovação celular.'
-    },
-    {
-      'range': '18h+',
-      'title': 'Autofagia Profunda & HGH',
-      'desc': 'Limpeza celular maximizada e elevação do HGH.'
-    },
+    {'range': '0h - 2h', 'title': 'Digestão Ativa', 'desc': 'O corpo digere os alimentos. A glicose e a insulina sobem.'},
+    {'range': '2h - 8h', 'title': 'Estabilização de Glicemia', 'desc': 'Insulina cai. O corpo usa o glicogênio armazenado.'},
+    {'range': '8h - 12h', 'title': 'Transição & Queima de Gordura', 'desc': 'Glicogênio esgotando. Ativação da queima de gordura.'},
+    {'range': '12h - 18h', 'title': 'Cetose & Autofagia Inicial', 'desc': 'Gordura vira cetonas. Início da renovação celular.'},
+    {'range': '18h+', 'title': 'Autofagia Profunda & HGH', 'desc': 'Limpeza celular maximizada e elevação do HGH.'},
   ];
 
   @override
@@ -401,6 +364,12 @@ class _FastingTabState extends State<FastingTab> {
   void _stopTimer() {
     _timer?.cancel();
     _timer = null;
+  }
+
+  void _cancelNotification() {
+    if (!kIsWeb) {
+      flutterLocalNotificationsPlugin.cancel(888).catchError((_) {});
+    }
   }
 
   Future<void> _loadFastingState() async {
@@ -430,29 +399,41 @@ class _FastingTabState extends State<FastingTab> {
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (_fastingStartTime != null && mounted) {
         setState(() {
-          _elapsedSeconds =
-              DateTime.now().difference(_fastingStartTime!).inSeconds;
+          _elapsedSeconds = DateTime.now().difference(_fastingStartTime!).inSeconds;
         });
+        _showNotification();
       }
     });
   }
 
-  Future<void> _cancelNotifications() async {
-    if (!kIsWeb) {
-      try {
-        await flutterLocalNotificationsPlugin.cancel(100);
-      } catch (e) {
-        debugPrint('Erro ao cancelar notificação: $e');
-      }
-    }
+  Future<void> _showNotification() async {
+    if (kIsWeb || !_isFasting) return;
+    int h = _elapsedSeconds ~/ 3600;
+    int m = (_elapsedSeconds % 3600) ~/ 60;
+    int s = _elapsedSeconds % 60;
+
+    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+      'fasting_channel',
+      'Jejum em Andamento',
+      importance: Importance.low,
+      priority: Priority.low,
+      ongoing: true,
+      autoCancel: false,
+    );
+
+    const NotificationDetails details = NotificationDetails(android: androidDetails);
+    await flutterLocalNotificationsPlugin.show(
+      888,
+      'Vitae - Jejum em Andamento',
+      'Tempo: ${h.toString().padLeft(2, '0')}h ${m.toString().padLeft(2, '0')}m ${s.toString().padLeft(2, '0')}s (Meta: ${_targetHours}h)',
+      details,
+    ).catchError((_) {});
   }
 
   Future<void> _toggleFasting() async {
-    final prefs = await SharedPreferences.getInstance();
-
     if (_isFasting) {
       _stopTimer();
-      await _cancelNotifications();
+      _cancelNotification();
 
       int currentElapsed = _elapsedSeconds;
       int hrs = currentElapsed ~/ 3600;
@@ -461,30 +442,30 @@ class _FastingTabState extends State<FastingTab> {
 
       widget.onFinishFasting({
         'id': DateTime.now().millisecondsSinceEpoch,
-        'date':
-            '${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year}',
+        'date': '${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year}',
         'duration': '${hrs}h ${mins}m',
         'target': '${_targetHours}h',
       });
 
+      setState(() {
+        _isFasting = false;
+        _elapsedSeconds = 0;
+        _fastingStartTime = null;
+      });
+
+      final prefs = await SharedPreferences.getInstance();
       await prefs.remove('fasting_start_time');
       await prefs.remove('fasting_target');
 
       if (mounted) {
-        setState(() {
-          _isFasting = false;
-          _elapsedSeconds = 0;
-          _fastingStartTime = null;
-        });
-
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('Jejum encerrado e registrado no histórico!')),
+          const SnackBar(content: Text('Jejum encerrado e registrado!')),
         );
       }
     } else {
       final now = DateTime.now();
 
+      final prefs = await SharedPreferences.getInstance();
       await prefs.setString('fasting_start_time', now.toIso8601String());
       await prefs.setInt('fasting_target', _targetHours);
 
@@ -495,38 +476,13 @@ class _FastingTabState extends State<FastingTab> {
       });
 
       _startTimer();
-
-      if (!kIsWeb) {
-        try {
-          if (await Permission.notification.isGranted) {
-            const AndroidNotificationDetails androidDetails =
-                AndroidNotificationDetails(
-              'fasting_channel',
-              'Jejum Intermitente',
-              channelDescription: 'Notificações do Jejum Vitae',
-              importance: Importance.max,
-              priority: Priority.high,
-            );
-            const NotificationDetails platformDetails =
-                NotificationDetails(android: androidDetails);
-            await flutterLocalNotificationsPlugin.show(
-              100,
-              'Jejum Iniciado!',
-              'Sua meta é de $_targetHours horas. Mantenha o foco!',
-              platformDetails,
-            );
-          }
-        } catch (e) {
-          debugPrint('Erro ao enviar notificação: $e');
-        }
-      }
     }
   }
 
   void _showAddManualDialog() {
     final dateCtrl = TextEditingController(
-        text:
-            '${DateTime.now().day.toString().padLeft(2, '0')}/${DateTime.now().month.toString().padLeft(2, '0')}/${DateTime.now().year}');
+      text: '${DateTime.now().day.toString().padLeft(2, '0')}/${DateTime.now().month.toString().padLeft(2, '0')}/${DateTime.now().year}'
+    );
     final hoursCtrl = TextEditingController(text: '16');
     final minutesCtrl = TextEditingController(text: '0');
 
@@ -541,8 +497,7 @@ class _FastingTabState extends State<FastingTab> {
             children: [
               TextField(
                 controller: dateCtrl,
-                decoration:
-                    const InputDecoration(labelText: "Data (DD/MM/AAAA)"),
+                decoration: const InputDecoration(labelText: "Data (DD/MM/AAAA)"),
               ),
               TextField(
                 controller: hoursCtrl,
@@ -552,16 +507,13 @@ class _FastingTabState extends State<FastingTab> {
               TextField(
                 controller: minutesCtrl,
                 keyboardType: TextInputType.number,
-                decoration:
-                    const InputDecoration(labelText: "Minutos de Jejum"),
+                decoration: const InputDecoration(labelText: "Minutos de Jejum"),
               ),
             ],
           ),
         ),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Cancelar")),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
           ElevatedButton(
             onPressed: () {
               int h = int.tryParse(hoursCtrl.text) ?? 0;
@@ -617,12 +569,9 @@ class _FastingTabState extends State<FastingTab> {
               dropdownColor: const Color(0xFF1A2632),
               style: const TextStyle(color: Colors.white, fontSize: 16),
               items: [12, 14, 16, 18, 20, 24].map((h) {
-                return DropdownMenuItem(
-                    value: h, child: Text('Protocolo $h horas'));
+                return DropdownMenuItem(value: h, child: Text('Protocolo $h horas'));
               }).toList(),
-              onChanged: _isFasting
-                  ? null
-                  : (val) => setState(() => _targetHours = val!),
+              onChanged: _isFasting ? null : (val) => setState(() => _targetHours = val!),
             ),
             const SizedBox(height: 20),
             Center(
@@ -631,30 +580,18 @@ class _FastingTabState extends State<FastingTab> {
                 height: 220,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  border: Border.all(
-                      color: _isFasting ? Colors.tealAccent : Colors.grey,
-                      width: 8),
+                  border: Border.all(color: _isFasting ? Colors.tealAccent : Colors.grey, width: 8),
                 ),
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Text(_isFasting ? "Em progresso" : "Pronto",
-                        style:
-                            const TextStyle(fontSize: 16, color: Colors.grey)),
+                    Text(_isFasting ? "Em progresso" : "Pronto", style: const TextStyle(fontSize: 16, color: Colors.grey)),
                     const SizedBox(height: 8),
-                    Text(formatTime(_elapsedSeconds),
-                        style: const TextStyle(
-                            fontSize: 30, fontWeight: FontWeight.bold)),
+                    Text(formatTime(_elapsedSeconds), style: const TextStyle(fontSize: 30, fontWeight: FontWeight.bold)),
                     if (_isFasting) ...[
                       const SizedBox(height: 10),
-                      Text("Restante:",
-                          style: TextStyle(
-                              color: Colors.orangeAccent.shade100,
-                              fontSize: 12)),
-                      Text(formatTime(remainingSecs),
-                          style: const TextStyle(
-                              color: Colors.orangeAccent,
-                              fontWeight: FontWeight.bold)),
+                      Text("Restante:", style: TextStyle(color: Colors.orangeAccent.shade100, fontSize: 12)),
+                      Text(formatTime(remainingSecs), style: const TextStyle(color: Colors.orangeAccent, fontWeight: FontWeight.bold)),
                     ]
                   ],
                 ),
@@ -663,17 +600,13 @@ class _FastingTabState extends State<FastingTab> {
             const SizedBox(height: 25),
             ElevatedButton(
               style: ElevatedButton.styleFrom(
-                backgroundColor:
-                    _isFasting ? Colors.redAccent : Colors.tealAccent,
+                backgroundColor: _isFasting ? Colors.redAccent : Colors.tealAccent,
                 minimumSize: const Size(double.infinity, 50),
               ),
               onPressed: _toggleFasting,
               child: Text(
                 _isFasting ? 'CONCLUIR JEJUM' : 'INICIAR JEJUM',
-                style: const TextStyle(
-                    color: Colors.black,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16),
+                style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 16),
               ),
             ),
             const SizedBox(height: 25),
@@ -681,9 +614,7 @@ class _FastingTabState extends State<FastingTab> {
               children: const [
                 Icon(Icons.bolt, color: Colors.tealAccent),
                 SizedBox(width: 8),
-                Text("Estágios Metabólicos do Jejum",
-                    style:
-                        TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                Text("Estágios Metabólicos do Jejum", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               ],
             ),
             const SizedBox(height: 12),
@@ -701,9 +632,7 @@ class _FastingTabState extends State<FastingTab> {
                     margin: const EdgeInsets.only(right: 12),
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
-                      color: isCurrent
-                          ? Colors.teal.withOpacity(0.2)
-                          : const Color(0xFF1A2632),
+                      color: isCurrent ? Colors.teal.withOpacity(0.2) : const Color(0xFF1A2632),
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(
                         color: isCurrent ? Colors.tealAccent : Colors.white10,
@@ -716,36 +645,21 @@ class _FastingTabState extends State<FastingTab> {
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            Text(phase['range']!,
-                                style: TextStyle(
-                                    color: isCurrent
-                                        ? Colors.tealAccent
-                                        : Colors.orangeAccent,
-                                    fontWeight: FontWeight.bold)),
+                            Text(phase['range']!, style: TextStyle(color: isCurrent ? Colors.tealAccent : Colors.orangeAccent, fontWeight: FontWeight.bold)),
                             if (isCurrent)
                               Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(
-                                    color: Colors.tealAccent,
-                                    borderRadius: BorderRadius.circular(4)),
-                                child: const Text("ATUAL",
-                                    style: TextStyle(
-                                        color: Colors.black,
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.bold)),
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(color: Colors.tealAccent, borderRadius: BorderRadius.circular(4)),
+                                child: const Text("ATUAL", style: TextStyle(color: Colors.black, fontSize: 10, fontWeight: FontWeight.bold)),
                               )
                           ],
                         ),
                         const SizedBox(height: 6),
-                        Text(phase['title']!,
-                            style: const TextStyle(
-                                fontWeight: FontWeight.bold, fontSize: 14)),
+                        Text(phase['title']!, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
                         const SizedBox(height: 6),
                         Text(
                           phase['desc']!,
-                          style: const TextStyle(
-                              color: Colors.white70, fontSize: 12),
+                          style: const TextStyle(color: Colors.white70, fontSize: 12),
                           maxLines: 3,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -763,25 +677,20 @@ class _FastingTabState extends State<FastingTab> {
                   children: const [
                     Icon(Icons.history, color: Colors.tealAccent),
                     SizedBox(width: 8),
-                    Text("Histórico de Jejuns",
-                        style: TextStyle(
-                            fontWeight: FontWeight.bold, fontSize: 16)),
+                    Text("Histórico de Jejuns", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   ],
                 ),
                 ElevatedButton.icon(
                   onPressed: _showAddManualDialog,
                   icon: const Icon(Icons.add, size: 16),
                   label: const Text("Novo Jejum"),
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.tealAccent,
-                      foregroundColor: Colors.black),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.tealAccent, foregroundColor: Colors.black),
                 ),
               ],
             ),
             const SizedBox(height: 10),
             widget.history.isEmpty
-                ? const Text("Nenhum jejum registrado ainda.",
-                    style: TextStyle(color: Colors.grey))
+                ? const Text("Nenhum jejum registrado ainda.", style: TextStyle(color: Colors.grey))
                 : ListView.builder(
                     shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
@@ -792,316 +701,10 @@ class _FastingTabState extends State<FastingTab> {
                         color: const Color(0xFF1A2632),
                         child: ListTile(
                           title: Text("Duração: ${item['duration']}"),
-                          subtitle: Text(
-                              "Data: ${item['date']} | Meta: ${item['target']}"),
+                          subtitle: Text("Data: ${item['date']} | Meta: ${item['target']}"),
                           trailing: IconButton(
-                            icon: const Icon(Icons.delete,
-                                color: Colors.redAccent),
+                            icon: const Icon(Icons.delete, color: Colors.redAccent),
                             onPressed: () => widget.onDeleteFasting(item['id']),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class DiaryTab extends StatelessWidget {
-  final String userName;
-  final double weightCurrent;
-  final double weightTarget;
-  final double weightStart;
-  final DateTime? targetDate;
-  final DateTime? startDate;
-  final double heightCm;
-  final List<Map<String, dynamic>> weightHistory;
-  final Function(String, double, double, double, double, DateTime?, DateTime?)
-      onProfileUpdate;
-  final Function(int) onDeleteWeight;
-  final Function(double) onAddWeight;
-
-  const DiaryTab({
-    super.key,
-    required this.userName,
-    required this.weightCurrent,
-    required this.weightTarget,
-    required this.weightStart,
-    required this.targetDate,
-    required this.startDate,
-    required this.heightCm,
-    required this.weightHistory,
-    required this.onProfileUpdate,
-    required this.onDeleteWeight,
-    required this.onAddWeight,
-  });
-
-  void _showEditProfileDialog(BuildContext context) {
-    final nameCtrl = TextEditingController(text: userName);
-    final startCtrl = TextEditingController(
-        text: weightStart == 0 ? '' : weightStart.toString());
-    final curCtrl = TextEditingController(
-        text: weightCurrent == 0 ? '' : weightCurrent.toString());
-    final tarCtrl = TextEditingController(
-        text: weightTarget == 0 ? '' : weightTarget.toString());
-    final heightCtrl =
-        TextEditingController(text: heightCm == 0 ? '' : heightCm.toString());
-
-    DateTime? selStartDate = startDate;
-    DateTime? selTargetDate = targetDate;
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          backgroundColor: const Color(0xFF1A2632),
-          title: const Text("Editar Perfil & Metas"),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                    controller: nameCtrl,
-                    decoration: const InputDecoration(labelText: "Nome")),
-                TextField(
-                    controller: startCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration:
-                        const InputDecoration(labelText: "Peso Inicial (kg)")),
-                TextField(
-                    controller: curCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration:
-                        const InputDecoration(labelText: "Peso Atual (kg)")),
-                TextField(
-                    controller: tarCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration:
-                        const InputDecoration(labelText: "Meta de Peso (kg)")),
-                TextField(
-                    controller: heightCtrl,
-                    keyboardType: TextInputType.number,
-                    decoration:
-                        const InputDecoration(labelText: "Altura (cm)")),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text("Cancelar")),
-            ElevatedButton(
-              onPressed: () {
-                onProfileUpdate(
-                  nameCtrl.text,
-                  double.tryParse(startCtrl.text) ?? 0.0,
-                  double.tryParse(curCtrl.text) ?? 0.0,
-                  double.tryParse(tarCtrl.text) ?? 0.0,
-                  double.tryParse(heightCtrl.text) ?? 0.0,
-                  selStartDate,
-                  selTargetDate,
-                );
-                Navigator.pop(ctx);
-              },
-              child: const Text("Salvar"),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showAddWeightDialog(BuildContext context) {
-    final wCtrl = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1A2632),
-        title: const Text("Registrar Novo Peso"),
-        content: TextField(
-          controller: wCtrl,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(labelText: "Novo Peso (kg)"),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Cancelar")),
-          ElevatedButton(
-            onPressed: () {
-              double? val = double.tryParse(wCtrl.text);
-              if (val != null) onAddWeight(val);
-              Navigator.pop(ctx);
-            },
-            child: const Text("Salvar"),
-          ),
-        ],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    double totalWeightToLose = weightStart - weightTarget;
-    double weightLost = weightStart - weightCurrent;
-    double remainingWeight = weightCurrent - weightTarget;
-    double progressPercent = (totalWeightToLose > 0 && weightStart > 0)
-        ? (weightLost / totalWeightToLose).clamp(0.0, 1.0)
-        : 0.0;
-
-    double imc = 0.0;
-    double bodyFatPercent = 0.0;
-    if (heightCm > 0 && weightCurrent > 0) {
-      double heightMeters = heightCm / 100;
-      imc = weightCurrent / (heightMeters * heightMeters);
-      bodyFatPercent = ((1.20 * imc) + (0.23 * 25) - 5.4).clamp(5.0, 60.0);
-    }
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Diário Vitae'),
-        backgroundColor: Colors.transparent,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.edit, color: Colors.tealAccent),
-            onPressed: () => _showEditProfileDialog(context),
-          )
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            Text(userName,
-                style:
-                    const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 20),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                Column(children: [
-                  const Text("Começar", style: TextStyle(color: Colors.grey)),
-                  Text("${weightStart.toStringAsFixed(1)} kg",
-                      style: const TextStyle(fontWeight: FontWeight.bold)),
-                ]),
-                Container(
-                  width: 120,
-                  height: 120,
-                  decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.tealAccent, width: 4)),
-                  child: Center(
-                      child: Text("${weightCurrent.toStringAsFixed(1)} kg",
-                          style: const TextStyle(
-                              fontSize: 20, fontWeight: FontWeight.bold))),
-                ),
-                Column(children: [
-                  const Text("Objetivo", style: TextStyle(color: Colors.grey)),
-                  Text("${weightTarget.toStringAsFixed(1)} kg",
-                      style: const TextStyle(fontWeight: FontWeight.bold)),
-                ]),
-              ],
-            ),
-            const SizedBox(height: 20),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                  "Progresso Real: ${(progressPercent * 100).toStringAsFixed(1)}% | Faltam ${remainingWeight.toStringAsFixed(1)} kg",
-                  style:
-                      const TextStyle(color: Colors.tealAccent, fontSize: 12)),
-            ),
-            const SizedBox(height: 4),
-            LinearProgressIndicator(
-                value: progressPercent,
-                color: Colors.tealAccent,
-                backgroundColor: Colors.white10,
-                minHeight: 8),
-            const SizedBox(height: 25),
-            Row(
-              children: [
-                Expanded(
-                  child: Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                        color: const Color(0xFF1A2632),
-                        borderRadius: BorderRadius.circular(10)),
-                    child: Column(
-                      children: [
-                        const Text("IMC",
-                            style: TextStyle(color: Colors.grey, fontSize: 12)),
-                        Text(imc == 0 ? '--' : imc.toStringAsFixed(1),
-                            style: const TextStyle(
-                                fontSize: 20,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.orangeAccent)),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                        color: const Color(0xFF1A2632),
-                        borderRadius: BorderRadius.circular(10)),
-                    child: Column(
-                      children: [
-                        const Text("Gordura Corporal",
-                            style: TextStyle(color: Colors.grey, fontSize: 12)),
-                        Text(
-                            bodyFatPercent == 0
-                                ? '--'
-                                : "${bodyFatPercent.toStringAsFixed(1)}%",
-                            style: const TextStyle(
-                                fontSize: 20,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.tealAccent)),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 25),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text("Histórico de Pesagem",
-                    style:
-                        TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                ElevatedButton.icon(
-                  onPressed: () => _showAddWeightDialog(context),
-                  icon: const Icon(Icons.add, size: 16),
-                  label: const Text("Novo Peso"),
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.tealAccent,
-                      foregroundColor: Colors.black),
-                )
-              ],
-            ),
-            const SizedBox(height: 10),
-            weightHistory.isEmpty
-                ? const Text("Nenhum registro de peso.",
-                    style: TextStyle(color: Colors.grey))
-                : ListView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    itemCount: weightHistory.length,
-                    itemBuilder: (ctx, idx) {
-                      final item = weightHistory[idx];
-                      return Card(
-                        color: const Color(0xFF1A2632),
-                        child: ListTile(
-                          title: Text("${item['weight']} kg"),
-                          subtitle: Text("Data: ${item['date']}"),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete,
-                                color: Colors.redAccent),
-                            onPressed: () => onDeleteWeight(item['id']),
                           ),
                         ),
                       );
@@ -1138,112 +741,66 @@ class RunTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    double paceMinutes = distanceKm > 0 ? (seconds / 60) / distanceKm : 0.0;
-    int pMin = paceMinutes.toInt();
-    int pSec = ((paceMinutes - pMin) * 60).toInt();
-    int calories = (distanceKm * 65).toInt();
-
-    String formatRunTime(int totalSecs) {
-      int h = totalSecs ~/ 3600;
-      int m = (totalSecs % 3600) ~/ 60;
-      int s = totalSecs % 60;
-      return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
-    }
+    int h = seconds ~/ 3600;
+    int m = (seconds % 3600) ~/ 60;
+    int s = seconds % 60;
+    String timeStr = '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
 
     return Scaffold(
       appBar: AppBar(
-          title: const Text('Rastreamento de Corrida'),
-          backgroundColor: Colors.transparent),
+        title: const Text('Corrida & Caminhada'),
+        backgroundColor: Colors.transparent,
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           children: [
-            Center(
-              child: Column(
-                children: [
-                  Text(distanceKm.toStringAsFixed(2),
-                      style: const TextStyle(
-                          fontSize: 64,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.tealAccent)),
-                  const Text("QUILÔMETROS",
-                      style: TextStyle(color: Colors.grey, letterSpacing: 2)),
-                  const SizedBox(height: 20),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      Column(
-                        children: [
-                          const Icon(Icons.timer, color: Colors.orangeAccent),
-                          const SizedBox(height: 4),
-                          Text(formatRunTime(seconds),
-                              style: const TextStyle(
-                                  fontSize: 16, fontWeight: FontWeight.bold)),
-                          const Text("Tempo",
-                              style:
-                                  TextStyle(color: Colors.grey, fontSize: 12)),
-                        ],
+            Card(
+              color: const Color(0xFF1A2632),
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  children: [
+                    Text(
+                      isRunning ? "CORRIDA EM ANDAMENTO" : "PRONTO PARA CORRER",
+                      style: TextStyle(
+                        color: isRunning ? Colors.tealAccent : Colors.grey,
+                        fontWeight: FontWeight.bold,
                       ),
-                      Column(
-                        children: [
-                          const Icon(Icons.speed, color: Colors.tealAccent),
-                          const SizedBox(height: 4),
-                          Text("$pMin:${pSec.toString().padLeft(2, '0')}",
-                              style: const TextStyle(
-                                  fontSize: 16, fontWeight: FontWeight.bold)),
-                          const Text("Pace (/km)",
-                              style:
-                                  TextStyle(color: Colors.grey, fontSize: 12)),
-                        ],
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      '${distanceKm.toStringAsFixed(2)} km',
+                      style: const TextStyle(fontSize: 40, fontWeight: FontWeight.bold, color: Colors.tealAccent),
+                    ),
+                    Text('Tempo: $timeStr', style: const TextStyle(fontSize: 18, color: Colors.white70)),
+                    const SizedBox(height: 20),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: isRunning ? Colors.redAccent : Colors.tealAccent,
+                        minimumSize: const Size(double.infinity, 50),
                       ),
-                      Column(
-                        children: [
-                          const Icon(Icons.local_fire_department,
-                              color: Colors.redAccent),
-                          const SizedBox(height: 4),
-                          Text("$calories",
-                              style: const TextStyle(
-                                  fontSize: 16, fontWeight: FontWeight.bold)),
-                          const Text("Kcal",
-                              style:
-                                  TextStyle(color: Colors.grey, fontSize: 12)),
-                        ],
+                      onPressed: onToggleRun,
+                      child: Text(
+                        isRunning ? 'FINALIZAR CORRIDA' : 'INICIAR CORRIDA',
+                        style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 16),
                       ),
-                    ],
-                  ),
-                ],
+                    ),
+                  ],
+                ),
               ),
             ),
-            const SizedBox(height: 30),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor:
-                    isRunning ? Colors.redAccent : Colors.tealAccent,
-                minimumSize: const Size(double.infinity, 50),
-              ),
-              onPressed: onToggleRun,
-              child: Text(
-                isRunning ? 'PARAR CORRIDA' : 'INICIAR CORRIDA',
-                style: const TextStyle(
-                    color: Colors.black,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16),
-              ),
-            ),
-            const SizedBox(height: 30),
+            const SizedBox(height: 25),
             Row(
               children: const [
                 Icon(Icons.history, color: Colors.tealAccent),
                 SizedBox(width: 8),
-                Text("Histórico de Corridas",
-                    style:
-                        TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                Text("Histórico de Corridas", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               ],
             ),
             const SizedBox(height: 10),
             history.isEmpty
-                ? const Text("Nenhuma corrida registrada ainda.",
-                    style: TextStyle(color: Colors.grey))
+                ? const Text("Nenhuma corrida registrada.", style: TextStyle(color: Colors.grey))
                 : ListView.builder(
                     shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
@@ -1254,261 +811,10 @@ class RunTab extends StatelessWidget {
                         color: const Color(0xFF1A2632),
                         child: ListTile(
                           title: Text("${item['distance']} - ${item['time']}"),
-                          subtitle: Text(
-                              "Data: ${item['date']} | Pace: ${item['pace']} | ${item['calories']}"),
+                          subtitle: Text("Data: ${item['date']} | Pace: ${item['pace']}"),
                           trailing: IconButton(
-                            icon: const Icon(Icons.delete,
-                                color: Colors.redAccent),
+                            icon: const Icon(Icons.delete, color: Colors.redAccent),
                             onPressed: () => onDeleteRun(item['id']),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class MeasurementsTab extends StatelessWidget {
-  final Map<String, bool> enabledMeasurements;
-  final List<Map<String, dynamic>> history;
-  final Function(Map<String, bool>) onUpdateConfig;
-  final Function(Map<String, dynamic>) onAddMeasurement;
-  final Function(int) onDeleteMeasurement;
-
-  const MeasurementsTab({
-    super.key,
-    required this.enabledMeasurements,
-    required this.history,
-    required this.onUpdateConfig,
-    required this.onAddMeasurement,
-    required this.onDeleteMeasurement,
-  });
-
-  void _showAddMeasurementDialog(BuildContext context) {
-    final armCtrl = TextEditingController();
-    final bellyCtrl = TextEditingController();
-    final waistCtrl = TextEditingController();
-    final dateCtrl = TextEditingController(
-        text:
-            '${DateTime.now().day.toString().padLeft(2, '0')}/${DateTime.now().month.toString().padLeft(2, '0')}/${DateTime.now().year}');
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1A2632),
-        title: const Text("Novo Registro de Medidas"),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                  controller: dateCtrl,
-                  decoration:
-                      const InputDecoration(labelText: "Data (DD/MM/AAAA)")),
-              TextField(
-                  controller: armCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: "Braço (cm)")),
-              TextField(
-                  controller: bellyCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: "Barriga (cm)")),
-              TextField(
-                  controller: waistCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: "Cintura (cm)")),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Cancelar")),
-          ElevatedButton(
-            onPressed: () {
-              onAddMeasurement({
-                'id': DateTime.now().millisecondsSinceEpoch,
-                'date': dateCtrl.text,
-                'arm': double.tryParse(armCtrl.text) ?? 0.0,
-                'belly': double.tryParse(bellyCtrl.text) ?? 0.0,
-                'waist': double.tryParse(waistCtrl.text) ?? 0.0,
-              });
-              Navigator.pop(ctx);
-            },
-            child: const Text("Salvar"),
-          ),
-        ],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-          title: const Text('Medidas Corporais'),
-          backgroundColor: Colors.transparent),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            ElevatedButton.icon(
-              onPressed: () => _showAddMeasurementDialog(context),
-              icon: const Icon(Icons.add, size: 16),
-              label: const Text("Novo Registro de Medidas"),
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.tealAccent,
-                  foregroundColor: Colors.black),
-            ),
-            const SizedBox(height: 20),
-            history.isEmpty
-                ? const Text("Nenhum histórico de medidas disponível.",
-                    style: TextStyle(color: Colors.grey))
-                : ListView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    itemCount: history.length,
-                    itemBuilder: (ctx, idx) {
-                      final item = history[idx];
-                      return Card(
-                        color: const Color(0xFF1A2632),
-                        child: ListTile(
-                          title: Text("Data: ${item['date']}"),
-                          subtitle: Text(
-                              "Braço: ${item['arm']}cm | Barriga: ${item['belly']}cm | Cintura: ${item['waist']}cm"),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete,
-                                color: Colors.redAccent),
-                            onPressed: () => onDeleteMeasurement(item['id']),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class DietTab extends StatelessWidget {
-  final List<Map<String, dynamic>> fixedMeals;
-  final List<Map<String, dynamic>> meals;
-  final Function(Map<String, dynamic>) onAddFixedMeal;
-  final Function(int) onDeleteFixedMeal;
-  final Function(Map<String, dynamic>) onAddMeal;
-  final Function(int) onToggleMealDone;
-  final Function(int) onDeleteMeal;
-
-  const DietTab({
-    super.key,
-    required this.fixedMeals,
-    required this.meals,
-    required this.onAddFixedMeal,
-    required this.onDeleteFixedMeal,
-    required this.onAddMeal,
-    required this.onToggleMealDone,
-    required this.onDeleteMeal,
-  });
-
-  void _showAddMealDialog(BuildContext context) {
-    final titleCtrl = TextEditingController();
-    final timeCtrl = TextEditingController(text: "08:00");
-    final foodCtrl = TextEditingController();
-    final calCtrl = TextEditingController();
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1A2632),
-        title: const Text("Nova Refeição"),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                  controller: titleCtrl,
-                  decoration:
-                      const InputDecoration(labelText: "Nome da Refeição")),
-              TextField(
-                  controller: timeCtrl,
-                  decoration: const InputDecoration(labelText: "Horário")),
-              TextField(
-                  controller: foodCtrl,
-                  decoration: const InputDecoration(labelText: "Alimentos")),
-              TextField(
-                  controller: calCtrl,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: "Calorias")),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Cancelar")),
-          ElevatedButton(
-            onPressed: () {
-              onAddMeal({
-                'id': DateTime.now().millisecondsSinceEpoch,
-                'title': titleCtrl.text.isEmpty ? 'Refeição' : titleCtrl.text,
-                'time': timeCtrl.text,
-                'foods': foodCtrl.text,
-                'calories': int.tryParse(calCtrl.text) ?? 150,
-                'done': true,
-              });
-              Navigator.pop(ctx);
-            },
-            child: const Text("Salvar"),
-          ),
-        ],
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-          title: const Text('Dieta & Refeições'),
-          backgroundColor: Colors.transparent),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          children: [
-            ElevatedButton.icon(
-              onPressed: () => _showAddMealDialog(context),
-              icon: const Icon(Icons.add, size: 16),
-              label: const Text("Adicionar Refeição"),
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.tealAccent,
-                  foregroundColor: Colors.black),
-            ),
-            const SizedBox(height: 20),
-            meals.isEmpty
-                ? const Text("Nenhuma refeição cadastrada.",
-                    style: TextStyle(color: Colors.grey))
-                : ListView.builder(
-                    shrinkWrap: true,
-                    physics: const NeverScrollableScrollPhysics(),
-                    itemCount: meals.length,
-                    itemBuilder: (ctx, idx) {
-                      final meal = meals[idx];
-                      return Card(
-                        color: const Color(0xFF1A2632),
-                        child: ListTile(
-                          title: Text("${meal['time']} - ${meal['title']}"),
-                          subtitle: Text(
-                              "${meal['foods']} (${meal['calories']} kcal)"),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete,
-                                color: Colors.redAccent),
-                            onPressed: () => onDeleteMeal(meal['id']),
                           ),
                         ),
                       );
