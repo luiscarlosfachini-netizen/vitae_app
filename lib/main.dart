@@ -113,24 +113,26 @@ class _MainScreenState extends State<MainScreen> {
     final savedDistance = prefs.getDouble('run_distance') ?? 0.0;
 
     if (startTimeStr != null) {
-      final startTime = DateTime.parse(startTimeStr);
-      final diff = DateTime.now().difference(startTime).inSeconds;
+      final startTime = DateTime.tryParse(startTimeStr);
+      if (startTime != null) {
+        final diff = DateTime.now().difference(startTime).inSeconds;
 
-      setState(() {
-        isRunning = true;
-        runStartTime = startTime;
-        runSeconds = diff;
-        runDistanceKm = savedDistance;
-      });
+        setState(() {
+          isRunning = true;
+          runStartTime = startTime;
+          runSeconds = diff;
+          runDistanceKm = savedDistance;
+        });
 
-      _startRunTracking();
+        _startRunTracking();
+      }
     }
   }
 
   void _startRunTracking() {
     runTimer?.cancel();
     runTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
-      if (runStartTime != null) {
+      if (runStartTime != null && mounted) {
         setState(() {
           runSeconds = DateTime.now().difference(runStartTime!).inSeconds;
         });
@@ -196,7 +198,10 @@ class _MainScreenState extends State<MainScreen> {
 
     if (isRunning) {
       runTimer?.cancel();
+      runTimer = null;
       positionStreamSubscription?.cancel();
+      positionStreamSubscription = null;
+
       if (!kIsWeb) await flutterLocalNotificationsPlugin.cancel(999);
 
       double paceMinutes = runDistanceKm > 0 ? (runSeconds / 60) / runDistanceKm : 0.0;
@@ -431,8 +436,13 @@ class _FastingTabState extends State<FastingTab> {
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _stopTimer();
     super.dispose();
+  }
+
+  void _stopTimer() {
+    _timer?.cancel();
+    _timer = null;
   }
 
   Future<void> _loadFastingState() async {
@@ -458,7 +468,7 @@ class _FastingTabState extends State<FastingTab> {
   }
 
   void _startTimer() {
-    _timer?.cancel();
+    _stopTimer();
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (_fastingStartTime != null && mounted) {
         setState(() {
@@ -494,21 +504,21 @@ class _FastingTabState extends State<FastingTab> {
   }
 
   Future<void> _toggleFasting() async {
+    // Para imediatamente o relógio e remove notificações para não gerar loop
+    _stopTimer();
+    if (!kIsWeb) {
+      await flutterLocalNotificationsPlugin.cancel(888);
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+
     if (_isFasting) {
-      // Interrompe temporizador imediatamente para não recarregar
-      _timer?.cancel();
-      _timer = null;
-
-      if (!kIsWeb) {
-        await flutterLocalNotificationsPlugin.cancel(888);
-      }
-
       int currentElapsed = _elapsedSeconds;
       int hrs = currentElapsed ~/ 3600;
       int mins = (currentElapsed % 3600) ~/ 60;
       final now = DateTime.now();
 
-      // Grava no histórico
+      // Salva no histórico
       widget.onFinishFasting({
         'id': DateTime.now().millisecondsSinceEpoch,
         'date': '${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year}',
@@ -516,15 +526,14 @@ class _FastingTabState extends State<FastingTab> {
         'target': '${_targetHours}h',
       });
 
-      // Atualiza interface imediatamente
+      // Zera o estado local imediatamente
       setState(() {
         _isFasting = false;
         _elapsedSeconds = 0;
         _fastingStartTime = null;
       });
 
-      // Remove dados salvos
-      final prefs = await SharedPreferences.getInstance();
+      // Limpa dados de armazenamento de forma limpa
       await prefs.remove('fasting_start_time');
       await prefs.remove('fasting_target');
 
@@ -536,15 +545,15 @@ class _FastingTabState extends State<FastingTab> {
     } else {
       final now = DateTime.now();
 
+      // Grava antes de alterar a UI
+      await prefs.setString('fasting_start_time', now.toIso8601String());
+      await prefs.setInt('fasting_target', _targetHours);
+
       setState(() {
         _isFasting = true;
         _fastingStartTime = now;
         _elapsedSeconds = 0;
       });
-
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('fasting_start_time', now.toIso8601String());
-      await prefs.setInt('fasting_target', _targetHours);
 
       _startTimer();
     }
@@ -954,7 +963,7 @@ class DiaryTab extends StatelessWidget {
     }
 
     String getImcClassification(double val) {
-      if (val == 0) return "Não calculado";
+      if (val == 0) return "Não calculatedo";
       if (val < 18.5) return "Abaixo do peso";
       if (val < 24.9) return "Peso normal";
       if (val < 29.9) return "Sobrepeso";
