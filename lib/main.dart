@@ -51,7 +51,7 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
-  int _currentIndex = 1;
+  int _currentIndex = 0;
 
   // Diário
   String userName = "Usuário";
@@ -224,9 +224,11 @@ class _MainScreenState extends State<MainScreen> {
       await prefs.remove('run_start_time');
       await prefs.remove('run_distance');
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Corrida salva no histórico!')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Corrida salva no histórico!')),
+        );
+      }
     } else {
       if (!kIsWeb) {
         LocationPermission permission = await Geolocator.checkPermission();
@@ -427,30 +429,38 @@ class _FastingTabState extends State<FastingTab> {
     _loadFastingState();
   }
 
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
   Future<void> _loadFastingState() async {
     final prefs = await SharedPreferences.getInstance();
     final startTimeStr = prefs.getString('fasting_start_time');
     final target = prefs.getInt('fasting_target') ?? 16;
 
     if (startTimeStr != null) {
-      final startTime = DateTime.parse(startTimeStr);
-      final diff = DateTime.now().difference(startTime).inSeconds;
-
-      setState(() {
-        _isFasting = true;
-        _fastingStartTime = startTime;
-        _targetHours = target;
-        _elapsedSeconds = diff;
-      });
-
-      _startTimer();
+      final startTime = DateTime.tryParse(startTimeStr);
+      if (startTime != null) {
+        final diff = DateTime.now().difference(startTime).inSeconds;
+        if (mounted) {
+          setState(() {
+            _isFasting = true;
+            _fastingStartTime = startTime;
+            _targetHours = target;
+            _elapsedSeconds = diff > 0 ? diff : 0;
+          });
+          _startTimer();
+        }
+      }
     }
   }
 
   void _startTimer() {
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_fastingStartTime != null) {
+      if (_fastingStartTime != null && mounted) {
         setState(() {
           _elapsedSeconds = DateTime.now().difference(_fastingStartTime!).inSeconds;
         });
@@ -460,7 +470,7 @@ class _FastingTabState extends State<FastingTab> {
   }
 
   Future<void> _showNotification() async {
-    if (kIsWeb) return;
+    if (kIsWeb || !_isFasting) return;
     int h = _elapsedSeconds ~/ 3600;
     int m = (_elapsedSeconds % 3600) ~/ 60;
     int s = _elapsedSeconds % 60;
@@ -484,16 +494,21 @@ class _FastingTabState extends State<FastingTab> {
   }
 
   Future<void> _toggleFasting() async {
-    final prefs = await SharedPreferences.getInstance();
-
     if (_isFasting) {
+      // Interrompe temporizador imediatamente para não recarregar
       _timer?.cancel();
-      if (!kIsWeb) await flutterLocalNotificationsPlugin.cancel(888);
+      _timer = null;
 
-      int hrs = _elapsedSeconds ~/ 3600;
-      int mins = (_elapsedSeconds % 3600) ~/ 60;
+      if (!kIsWeb) {
+        await flutterLocalNotificationsPlugin.cancel(888);
+      }
+
+      int currentElapsed = _elapsedSeconds;
+      int hrs = currentElapsed ~/ 3600;
+      int mins = (currentElapsed % 3600) ~/ 60;
       final now = DateTime.now();
 
+      // Grava no histórico
       widget.onFinishFasting({
         'id': DateTime.now().millisecondsSinceEpoch,
         'date': '${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year}',
@@ -501,14 +516,17 @@ class _FastingTabState extends State<FastingTab> {
         'target': '${_targetHours}h',
       });
 
-      await prefs.remove('fasting_start_time');
-      await prefs.remove('fasting_target');
-
+      // Atualiza interface imediatamente
       setState(() {
         _isFasting = false;
         _elapsedSeconds = 0;
         _fastingStartTime = null;
       });
+
+      // Remove dados salvos
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('fasting_start_time');
+      await prefs.remove('fasting_target');
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -517,14 +535,16 @@ class _FastingTabState extends State<FastingTab> {
       }
     } else {
       final now = DateTime.now();
-      await prefs.setString('fasting_start_time', now.toIso8601String());
-      await prefs.setInt('fasting_target', _targetHours);
 
       setState(() {
         _isFasting = true;
         _fastingStartTime = now;
         _elapsedSeconds = 0;
       });
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('fasting_start_time', now.toIso8601String());
+      await prefs.setInt('fasting_target', _targetHours);
 
       _startTimer();
     }
@@ -1475,7 +1495,7 @@ class DietTab extends StatelessWidget {
               int calories = int.tryParse(calCtrl.text) ?? 200;
               onAddFixedMeal({
                 'id': DateTime.now().millisecondsSinceEpoch,
-                'title': titleCtrl.text.isEmpty ? 'Refeição Fina' : titleCtrl.text,
+                'title': titleCtrl.text.isEmpty ? 'Refeição Fixa' : titleCtrl.text,
                 'foods': foodCtrl.text,
                 'calories': calories,
               });
